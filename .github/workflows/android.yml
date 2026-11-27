@@ -1,0 +1,78 @@
+# Builds an Android APK of Feishin by wrapping the web build with Capacitor.
+# Run it from the Actions tab of your fork ("Build Android APK" -> "Run workflow"),
+# then download the APK from the run's "Artifacts" section.
+name: Build Android APK
+
+on:
+    workflow_dispatch:
+
+jobs:
+    android:
+        runs-on: ubuntu-latest
+        env:
+            NODE_OPTIONS: --max-old-space-size=4096
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v6
+
+            - name: Install pnpm
+              uses: pnpm/action-setup@v4
+
+            - name: Install Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: pnpm
+
+            # Capacitor 8 compiles with Java 21 (Java 17 fails with "invalid source release: 21").
+            - name: Install Java 21
+              uses: actions/setup-java@v5
+              with:
+                  distribution: temurin
+                  java-version: '21'
+
+            - name: Install Android SDK
+              uses: android-actions/setup-android@v3
+              with:
+                  packages: platform-tools
+
+            # --ignore-scripts skips downloading Electron, which the web build doesn't need.
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile --ignore-scripts
+
+            - name: Add Capacitor
+              run: |
+                  pnpm add --ignore-scripts @capacitor/core@^8 @capacitor/android@^8
+                  pnpm add -D --ignore-scripts @capacitor/cli@^8
+
+            - name: Build the web version
+              run: pnpm run build:web
+
+            # The Docker image fills settings.js at startup; the APK ships it with empty values.
+            - name: Add runtime settings file
+              run: sed -E 's/\$\{[A-Z0-9_]+\}//g' settings.js.template > out/web/settings.js
+
+            - name: Create the Android project
+              run: |
+                  if [ ! -d android ]; then npx cap add android; fi
+                  npx cap sync android
+
+            - name: Set the Feishin app icon
+              run: |
+                  command -v convert >/dev/null || (sudo apt-get update && sudo apt-get install -y imagemagick)
+                  mkdir -p build/android-icons
+                  convert assets/icons/1024x1024.png -resize 676x676 -background none -gravity center -extent 1024x1024 build/android-icons/icon-foreground.png
+                  convert -size 1024x1024 xc:white build/android-icons/icon-background.png
+                  cp assets/icons/1024x1024.png build/android-icons/icon-only.png
+                  npx -y @capacitor/assets@3 generate --android --assetPath build/android-icons
+
+            - name: Build the APK
+              working-directory: android
+              run: ./gradlew assembleDebug --no-daemon
+
+            - name: Upload the APK
+              uses: actions/upload-artifact@v7
+              with:
+                  name: feishin-android-apk
+                  path: android/app/build/outputs/apk/debug/app-debug.apk
+                  if-no-files-found: error
